@@ -18,6 +18,7 @@ def test_finished_batch_sends_one_snapshot_then_closes(client, directory):
         assert snapshot["batch_id"] == batch_id
         assert snapshot["status"] == "completed"
         assert snapshot["processed_hospitals"] == 2
+        assert snapshot["final"] is True
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
         assert closed.value.code == 1000
@@ -31,7 +32,7 @@ def test_running_batch_streams_each_change_until_done(client):
 
     with client.websocket_connect(f"/hospitals/bulk/{state.batch_id}/ws") as ws:
         first = ws.receive_json()
-        assert (first["status"], first["processed_hospitals"]) == ("processing", 0)
+        assert (first["status"], first["processed_hospitals"], first["final"]) == ("processing", 0, False)
 
         state.results[1].status = RowStatus.CREATED
         second = ws.receive_json()
@@ -44,16 +45,17 @@ def test_running_batch_streams_each_change_until_done(client):
         state.status = BatchStatus.COMPLETED
         events = [second]
         deadline = time.time() + 3
-        while events[-1]["status"] != "completed" and time.time() < deadline:
+        while not events[-1]["final"] and time.time() < deadline:
             events.append(ws.receive_json())
         assert events[-1]["status"] == "completed" and events[-1]["batch_activated"] is True
+        assert [e["final"] for e in events].count(True) == 1
         with pytest.raises(WebSocketDisconnect):
             ws.receive_json()
 
 
 def test_unknown_batch_closes_with_4404(client):
     with client.websocket_connect("/hospitals/bulk/00000000-0000-0000-0000-000000000000/ws") as ws:
-        assert ws.receive_json() == {"error": "Batch not found"}
+        assert ws.receive_json() == {"error": "Batch not found", "final": True}
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
         assert closed.value.code == 4404

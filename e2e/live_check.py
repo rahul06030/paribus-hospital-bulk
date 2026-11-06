@@ -159,13 +159,15 @@ def p_websocket():
         async with websockets.connect(ws_url, open_timeout=60) as ws:
             async for message in ws:
                 events.append(json.loads(message))
-            return events, ws.close_code
+                if events[-1]["final"]:
+                    break
+        return events
 
-    events, code = asyncio.run(stream())
+    events = asyncio.run(stream())
     statuses = [e["status"] for e in events]
-    assert statuses[-1] == "completed" and events[-1]["batch_activated"], statuses
-    assert code == 1000, code
-    return f"{len(events)} events: " + " -> ".join(dict.fromkeys(statuses)) + "; server closed 1000"
+    assert events[-1]["final"] and statuses[-1] == "completed" and events[-1]["batch_activated"], statuses
+    assert [e["final"] for e in events].count(True) == 1
+    return f"{len(events)} events: " + " -> ".join(dict.fromkeys(statuses)) + "; last one final"
 
 
 def n_websocket_unknown():
@@ -173,16 +175,11 @@ def n_websocket_unknown():
 
     async def run():
         async with websockets.connect(url, open_timeout=60) as ws:
-            msg = json.loads(await ws.recv())
-            try:
-                await ws.recv()
-            except websockets.ConnectionClosed:
-                pass
-            return msg, ws.close_code
+            return json.loads(await ws.recv())
 
-    msg, code = asyncio.run(run())
-    assert msg == {"error": "Batch not found"} and code == 4404, (msg, code)
-    return "error message, then close code 4404"
+    msg = asyncio.run(run())
+    assert msg == {"error": "Batch not found", "final": True}, msg
+    return "final error message"
 
 
 # ---------- negative ----------

@@ -206,8 +206,12 @@ async def rollback_batch(request: Request, batch_id: uuid.UUID):
 async def batch_progress_ws(websocket: WebSocket, batch_id: str):
     """Stream a batch's progress: a JSON snapshot on connect and after every change.
 
-    The server closes the socket once the batch has finished (code 1000), or
-    with code 4404 for an unknown batch.
+    Each message is a batch result plus `"final"`. The last message has
+    `"final": true` (the batch has finished), after which the server closes the
+    socket with code 1000. An unknown batch gets `{"error": ..., "final": true}`
+    and code 4404. Clients should stop on `"final": true` rather than wait for
+    the close frame: some proxies (Render's included) don't pass on a
+    server-initiated close.
     """
     await websocket.accept()
     state = None
@@ -216,19 +220,20 @@ async def batch_progress_ws(websocket: WebSocket, batch_id: str):
     except ValueError:
         pass
     if state is None:
-        await websocket.send_json({"error": "Batch not found"})
+        await websocket.send_json({"error": "Batch not found", "final": True})
         await websocket.close(code=4404)
         return
 
     last = None
     try:
         while True:
+            final = not state.is_running
             snapshot = state.to_result().model_dump(mode="json")
             snapshot.pop("processing_time_seconds")  # changes every tick; not a progress event
-            if snapshot != last:
+            if snapshot != last or final:
                 last = snapshot
-                await websocket.send_json(state.to_result().model_dump(mode="json"))
-            if not state.is_running:
+                await websocket.send_json({**state.to_result().model_dump(mode="json"), "final": final})
+            if final:
                 break
             await asyncio.sleep(0.2)
         await websocket.close()

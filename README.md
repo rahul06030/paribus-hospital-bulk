@@ -71,7 +71,7 @@ python -m websockets wss://paribus-hospital-bulk-docker.onrender.com/hospitals/b
 | `POST` | `/hospitals/bulk` | Upload a CSV; create every hospital, then activate the batch. `?async=true` returns `202` with a `Location` header and processes in the background. Optional `Idempotency-Key` header: repeating the same key and file returns the original batch (`Idempotent-Replayed: true`); the same key with another file gets `409` |
 | `POST` | `/hospitals/bulk/validate` | Check a CSV and report every problem, without creating anything |
 | `GET` | `/hospitals/bulk/{batch_id}` | Progress and per-row results; poll this for async batches |
-| `WS` | `/hospitals/bulk/{batch_id}/ws` | Progress stream: a JSON snapshot on connect and after every change; the server closes with `1000` when the batch finishes, `4404` for an unknown batch |
+| `WS` | `/hospitals/bulk/{batch_id}/ws` | Progress stream: a JSON snapshot on connect and after every change, each with `"final"`; the last one has `"final": true`. An unknown batch gets `{"error": ..., "final": true}`. Stop reading on `final`: the server then closes (1000, or 4404), but Render's proxy doesn't forward a server-initiated close frame |
 | `GET` | `/hospitals/bulk` | Recent batches, newest first (`?limit=1..100`) |
 | `POST` | `/hospitals/bulk/{batch_id}/resume` | Retry only the failed rows (or a failed activation), then activate. `409` if the batch is running, completed or rolled back |
 | `DELETE` | `/hospitals/bulk/{batch_id}` | Roll back: delete every hospital the batch created. `409` while running, `502` if the upstream fails |

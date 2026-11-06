@@ -73,7 +73,7 @@ Over 30 candidates have published this same assignment on GitHub. Reading the
 strongest (their READMEs and file trees) showed four things they had that this
 repo didn't, plus one flaw in our own code:
 
-- [x] **WebSocket progress.** The brief says "WebSocket or polling"; we now offer both: `WS /hospitals/bulk/{id}/ws` pushes a snapshot on every change and closes with 1000 when done, 4404 for an unknown batch.
+- [x] **WebSocket progress.** The brief says "WebSocket or polling"; we now offer both: `WS /hospitals/bulk/{id}/ws` pushes a snapshot on every change and closes with 1000 when done, 4404 for an unknown batch. Testing it on Render showed that Render's Cloudflare proxy does not pass on a close frame sent by the server (clients saw 1006 after a 10 s wait), so every message now carries `"final"` and clients stop on the final one instead of relying on the close code.
 - [x] **`Idempotency-Key` on uploads**, so a client re-sending an upload whose response it lost gets the original batch rather than a second copy of every hospital.
 - [x] **Upstream-aware health check** (`GET /health` → `ok` or `degraded`), plus a `Location` header and `links` on batch results.
 - [x] **CI and coverage**: GitHub Actions runs pytest on Python 3.9 and 3.12 (failing under 95% coverage) and builds and starts the Docker image.
