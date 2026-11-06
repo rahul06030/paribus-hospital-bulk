@@ -23,7 +23,9 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.client = client
     app.state.store = BatchStore(settings.max_stored_batches)
-    app.state.processor = BulkProcessor(client, settings.max_concurrency)
+    app.state.processor = BulkProcessor(
+        client, settings.max_concurrency, settings.max_retries, settings.retry_backoff_seconds
+    )
     yield
     await client.aclose()
 

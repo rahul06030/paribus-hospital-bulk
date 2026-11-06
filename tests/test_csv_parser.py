@@ -61,3 +61,8 @@ def test_rejects_rows_with_extra_columns():
     report = check("name,address\nA,B,C\n")
     assert not report.valid
     assert "Expected 2 columns" in report.errors[0].message
+
+
+def test_rejects_duplicate_rows_but_allows_same_name_elsewhere():
+    report = check("name,address,phone\nA,1 St,5\nA,2 St,5\nA,1 St,6\na,1 st,5\n")
+    assert [(e.row, e.message) for e in report.errors] == [(4, "Duplicate of row 1")]

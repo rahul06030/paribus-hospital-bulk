@@ -1,8 +1,13 @@
 """Async client for the Hospital Directory API.
 
-Retries transient failures (network errors, timeouts, 429 and 5xx) with
-exponential backoff. 4xx responses other than 429 are the request's fault,
-so they fail immediately.
+Retries transient failures with exponential backoff. 4xx responses other than
+429 are the request's fault, so they fail immediately.
+
+Creating a hospital is not idempotent, so a create is retried here only when
+the upstream certainly did not process it (connection never made, 429, 503).
+After an ambiguous failure (500/502/504, read timeout, dropped connection) the
+record may already exist; the error is raised with `ambiguous=True` and the
+processor checks the batch before trying again.
 """
 
 import asyncio
@@ -17,13 +22,25 @@ from app.models import HospitalRow
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# Statuses that mean the request was not processed.
+NOT_PROCESSED_STATUS = {429, 503}
+# Errors raised before the request reached the upstream.
+NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 class HospitalAPIError(Exception):
-    def __init__(self, message: str, status_code: Optional[int] = None, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        retryable: bool = False,
+        ambiguous: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        # True when the upstream may have applied the request despite the error.
+        self.ambiguous = ambiguous
 
 
 class HospitalDirectoryClient:
@@ -52,7 +69,7 @@ class HospitalDirectoryClient:
             "phone": row.phone,
             "creation_batch_id": batch_id,
         }
-        return await self._request("POST", "/hospitals/", json=payload)
+        return await self._request("POST", "/hospitals/", idempotent=False, json=payload)
 
     async def activate_batch(self, batch_id: str) -> Any:
         return await self._request("PATCH", f"/hospitals/batch/{batch_id}/activate")
@@ -73,31 +90,40 @@ class HospitalDirectoryClient:
                 return None
             raise
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+    async def _request(self, method: str, url: str, idempotent: bool = True, **kwargs: Any) -> Any:
+        """Send a request, retrying transient failures.
+
+        For a non-idempotent request, only failures where the upstream certainly
+        did nothing are retried; an ambiguous failure is raised at once.
+        """
         attempts = self._settings.max_retries + 1
         last_error: Optional[HospitalAPIError] = None
 
         for attempt in range(1, attempts + 1):
             try:
                 response = await self._http.request(method, url, **kwargs)
-            except httpx.TimeoutException as exc:
-                last_error = HospitalAPIError(f"Timed out calling {method} {url}", retryable=True)
-                logger.info("%s %s timed out (attempt %d/%d): %s", method, url, attempt, attempts, exc)
             except httpx.TransportError as exc:
-                last_error = HospitalAPIError(f"Network error calling {method} {url}: {exc}", retryable=True)
-                logger.info("%s %s network error (attempt %d/%d): %s", method, url, attempt, attempts, exc)
+                not_sent = isinstance(exc, NOT_SENT_ERRORS)
+                kind = "Timed out" if isinstance(exc, httpx.TimeoutException) else "Network error"
+                last_error = HospitalAPIError(
+                    f"{kind} calling {method} {url}: {exc!r}", retryable=True, ambiguous=not not_sent
+                )
+                logger.info("%s %s failed (attempt %d/%d): %r", method, url, attempt, attempts, exc)
             else:
                 if response.is_success:
                     return response.json() if response.content else None
-                retryable = response.status_code in RETRYABLE_STATUS
+                status_code = response.status_code
                 last_error = HospitalAPIError(
-                    f"{method} {url} returned {response.status_code}: {_detail(response)}",
-                    status_code=response.status_code,
-                    retryable=retryable,
+                    f"{method} {url} returned {status_code}: {_detail(response)}",
+                    status_code=status_code,
+                    retryable=status_code in RETRYABLE_STATUS,
+                    ambiguous=status_code >= 500 and status_code not in NOT_PROCESSED_STATUS,
                 )
-                if not retryable:
+                if not last_error.retryable:
                     raise last_error
 
+            if not idempotent and last_error.ambiguous:
+                raise last_error
             if attempt < attempts:
                 await asyncio.sleep(self._settings.retry_backoff_seconds * 2 ** (attempt - 1))
 

@@ -57,7 +57,8 @@ Green Valley Clinic,88 Hill View Shimla,
 
 - `name` and `address` are required; `phone` is optional (the column may be left out).
 - Headers are case-insensitive and may be in any order. UTF-8 (with or without BOM), quoted fields and blank lines are handled.
-- At most **20 hospitals** and 256 KB per file.
+- At most **20 hospitals** and 256 KB per file; fields up to 255 characters.
+- Exact duplicate rows (same name, address and phone, ignoring case) are rejected.
 
 ### Response
 
@@ -138,14 +139,18 @@ created. A partial batch stays inactive, so nothing half-uploaded appears as
 active. The client then chooses: **resume** (retry failed rows) or **roll back**
 (delete the batch upstream).
 
-**Retries.** Network errors, timeouts, `429` and `5xx` are retried with
-exponential backoff (`MAX_RETRIES`, default 3). Other `4xx` responses mean the
-data is wrong, so they fail immediately and are reported on the row.
+**Retries without duplicates.** `POST /hospitals/` is not idempotent: a create
+can fail with a 500 or time out *after* the upstream saved the record, and
+re-posting it would create a second copy. So errors are split in two:
 
-**Duplicate-safe resume.** A create can time out *after* the upstream saved
-the record. Before retrying, resume reads `GET /hospitals/batch/{id}` and adopts
-any record that matches a failed row (name, address, phone) instead of creating
-it again.
+- *Not processed* (connection refused, `429`, `503`): retried automatically with exponential backoff (`MAX_RETRIES`, default 3).
+- *Ambiguous* (`500`, `502`, `504`, read timeout, dropped connection): the processor first reads `GET /hospitals/batch/{id}` and adopts a matching record (same name, address, phone) that no other row has claimed. It posts again only if there is no such record.
+
+Resume runs the same adoption step before retrying failed rows. Because
+matching relies on rows being distinct, the validator rejects exact duplicate
+rows in a file. Other `4xx` responses mean the data is wrong, so they fail
+immediately and are reported on the row. GETs, the activate PATCH and DELETE
+are idempotent and are retried on any transient error.
 
 **Cold starts.** The upstream runs on Render's free tier and sleeps when idle;
 the first request can take close to a minute. Each batch first sends one
@@ -168,9 +173,8 @@ clients with short HTTP timeouts.
   For production I would keep batch state in Redis or Postgres and move
   processing to a queue (Celery, RQ or arq), so any instance can serve progress
   and batches survive deploys.
-- **Duplicate matching on resume** uses name, address and phone. Two genuinely
-  identical rows in one file are handled (each claims one upstream record), but
-  an idempotency key on the upstream create would be the robust fix.
+- **Matching saved records** uses name, address and phone. An idempotency key
+  on the upstream create would be the robust fix.
 - **No authentication**, matching the upstream API. I would add API keys and
   per-client rate limits before exposing this publicly.
 
@@ -190,15 +194,24 @@ All settings are environment variables (see `app/config.py`):
 
 ## Tests
 
-```bash
-pytest
-```
+Three layers, all passing:
 
-26 tests, run against a fake Hospital Directory API (respx), covering CSV
-validation edge cases, the happy path, retries of transient errors, no retries
-of client errors, partial failure, resume (including adopting records saved
-despite an error), activation failure, rollback, async mode, and the
-concurrency limit.
+| Layer | Command | What it covers |
+|---|---|---|
+| Unit and API tests (30, no network) | `pytest` | CSV edge cases; happy path; retry of transient errors; no retry of client errors; a create that saves then answers 500 is adopted, not duplicated; partial failure; resume; activation failure; rollback; async mode; concurrency limit |
+| Live checks (29) | `python e2e/live_check.py https://paribus-hospital-bulk-8941.onrender.com` | 7 positive flows and 22 negative cases against the deployment and the real upstream, verifying results upstream and deleting what it created |
+| Failure paths (6) | `sh e2e/run_failure_checks.sh` | A fault-injecting proxy between the service and the real upstream: partial failure then resume, transient retries, saved-but-errored create, activation failure then resume, every row failing, rollback |
+
+The failure-path layer found a real bug during development (blind POST retries
+creating duplicates), described with its fix in [PLAN.md](PLAN.md#6-bug-found-by-the-failure-path-tests-fixed).
+
+## Built with Claude Code
+
+Developed with [Claude Code](https://claude.com/claude-code) as a pair programmer:
+
+- [`PLAN.md`](PLAN.md): the plan agreed before coding, upstream measurements, test strategy, the bug log and next steps.
+- [`CLAUDE.md`](CLAUDE.md): project rules the agent follows (no duplicates, all-or-nothing activation, validate before side effects, response contract) and the commands it runs.
+- [`.claude/agents/`](.claude/agents): a `code-reviewer` subagent that checks changes against those rules, and an `e2e-tester` subagent that runs all three test layers and reports.
 
 ## Deploying on Render
 

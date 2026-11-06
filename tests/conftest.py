@@ -28,6 +28,7 @@ class FakeDirectory:
         self.fail_names = set()  # names that always get a 500
         self.flaky_names = {}  # name -> number of 503s before success
         self.reject_names = set()  # names that get a 422
+        self.save_then_fail_names = {}  # name -> number of creates that save but answer 500
         self.activate_status = 200
         self.create_calls = 0
 
@@ -44,6 +45,9 @@ class FakeDirectory:
             return httpx.Response(503, json={"detail": "unavailable"})
         hospital = {**body, "id": next(self.ids), "active": False}
         self.hospitals[hospital["id"]] = hospital
+        if self.save_then_fail_names.get(name, 0) > 0:
+            self.save_then_fail_names[name] -= 1
+            return httpx.Response(500, json={"detail": "saved, then crashed"})
         return httpx.Response(200, json=hospital)
 
     def batch(self, batch_id):

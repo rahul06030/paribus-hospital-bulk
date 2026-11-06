@@ -7,7 +7,7 @@ so a client sees every problem in one response instead of fixing them one at a t
 
 import csv
 import io
-from typing import List
+from typing import Dict, List, Tuple
 
 from app.models import HospitalRow, RowError, ValidationReport
 
@@ -59,6 +59,7 @@ def validate_csv(content: bytes, max_rows: int) -> ValidationReport:
     index = {name: columns.index(name) for name in columns}
     rows: List[HospitalRow] = []
     errors: List[RowError] = []
+    seen: Dict[Tuple[str, str, str], int] = {}
     data_row = 0
 
     try:
@@ -93,6 +94,14 @@ def validate_csv(content: bytes, max_rows: int) -> ValidationReport:
             if row_errors:
                 errors.extend(row_errors)
                 continue
+
+            # Identical rows would be indistinguishable upstream, which breaks
+            # matching a saved record back to its row after an ambiguous failure.
+            key = (values["name"].lower(), values["address"].lower(), values["phone"].lower())
+            if key in seen:
+                errors.append(RowError(row=data_row, message=f"Duplicate of row {seen[key]}"))
+                continue
+            seen[key] = data_row
 
             rows.append(
                 HospitalRow(

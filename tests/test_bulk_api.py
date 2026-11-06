@@ -50,6 +50,36 @@ def test_transient_upstream_errors_are_retried(client, directory):
     assert directory.create_calls == 7
 
 
+def test_ambiguous_create_failure_does_not_create_a_duplicate(client, directory):
+    # The upstream saves the hospital but answers 500 (twice); retrying the
+    # POST blindly would create it again.
+    directory.save_then_fail_names = {"Hospital 2": 2}
+    body = upload(client, make_csv(ROWS)).json()
+
+    assert body["status"] == "completed"
+    assert directory.create_calls == 5  # the saved record was adopted, not re-created
+    assert len(directory.hospitals) == 5
+    assert body["hospitals"][1]["hospital_id"] in directory.hospitals
+
+
+def test_ambiguous_failure_without_a_saved_record_is_retried(client, directory):
+    directory.fail_names = {"Hospital 2"}  # 500 every time, nothing saved
+    body = upload(client, make_csv(ROWS)).json()
+
+    assert body["hospitals"][1]["status"] == "failed"
+    assert body["hospitals"][1]["attempts"] == 3  # MAX_RETRIES=2 in tests
+    assert directory.create_calls == 4 + 3
+
+
+def test_identical_rows_are_rejected(client, directory):
+    rows = [("Twin Hospital", "1 Same St", "555"), ("twin hospital", "1 same st", "555")]
+    response = upload(client, make_csv(rows))
+
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["message"] == "Duplicate of row 1"
+    assert directory.create_calls == 0
+
+
 def test_client_errors_are_not_retried(client, directory):
     directory.reject_names = {"Hospital 3"}
     body = upload(client, make_csv(ROWS)).json()

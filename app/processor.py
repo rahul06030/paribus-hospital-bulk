@@ -9,7 +9,7 @@ as active records) until the failed rows are resumed or the batch is rolled back
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.client import HospitalAPIError, HospitalDirectoryClient
 from app.models import BatchStatus, HospitalRow, RowStatus
@@ -25,9 +25,17 @@ class BatchConflictError(Exception):
 
 
 class BulkProcessor:
-    def __init__(self, client: HospitalDirectoryClient, max_concurrency: int):
+    def __init__(
+        self,
+        client: HospitalDirectoryClient,
+        max_concurrency: int,
+        max_retries: int = 3,
+        retry_backoff_seconds: float = 0.5,
+    ):
         self._client = client
         self._max_concurrency = max_concurrency
+        self._max_retries = max_retries
+        self._retry_backoff = retry_backoff_seconds
 
     async def run(self, state: BatchState) -> None:
         async with state.lock:
@@ -76,16 +84,25 @@ class BulkProcessor:
     async def _create_row(self, state: BatchState, row: HospitalRow, semaphore: asyncio.Semaphore) -> None:
         result = state.results[row.row]
         async with semaphore:
-            result.attempts += 1
-            try:
-                created = await self._client.create_hospital(row, state.batch_id)
-            except HospitalAPIError as exc:
-                result.status = RowStatus.FAILED
-                result.error = str(exc)
-                return
-        result.hospital_id = created.get("id")
-        result.status = RowStatus.CREATED
-        result.error = None
+            for attempt in range(self._max_retries + 1):
+                result.attempts += 1
+                try:
+                    created = await self._client.create_hospital(row, state.batch_id)
+                except HospitalAPIError as exc:
+                    # After an ambiguous failure the upstream may have saved the
+                    # record anyway; adopt it rather than create a duplicate.
+                    if exc.ambiguous and await self._adopt_existing(state, [row]):
+                        return
+                    if not exc.ambiguous or attempt == self._max_retries:
+                        result.status = RowStatus.FAILED
+                        result.error = str(exc)
+                        return
+                    await asyncio.sleep(self._retry_backoff * 2 ** attempt)
+                else:
+                    result.hospital_id = created.get("id")
+                    result.status = RowStatus.CREATED
+                    result.error = None
+                    return
 
     async def _finish(self, state: BatchState) -> None:
         results = state.results.values()
@@ -108,32 +125,43 @@ class BulkProcessor:
         state.status = BatchStatus.COMPLETED
 
     async def _reconcile(self, state: BatchState) -> None:
-        """Mark failed rows as created if the upstream already has them.
-
-        A create call can time out after the upstream saved the record. Without
-        this step, resuming would create that hospital a second time.
-        """
+        """Before a resume, mark failed rows as created if the upstream already has them."""
         failed = [r for r in state.rows if state.results[r.row].status in RETRYABLE_ROW_STATUSES]
-        if not failed:
-            return
+        if failed:
+            await self._adopt_existing(state, failed)
+
+    async def _adopt_existing(self, state: BatchState, rows: List[HospitalRow]) -> bool:
+        """Match rows to upstream records in this batch that no row has claimed yet.
+
+        A row matches a record with the same name, address and phone. Returns
+        True if every given row was matched.
+        """
         try:
             existing = await self._client.get_batch(state.batch_id)
         except HospitalAPIError as exc:
-            logger.warning("Could not reconcile batch %s: %s", state.batch_id, exc)
-            return
+            logger.warning("Could not read batch %s from upstream: %s", state.batch_id, exc)
+            return False
 
-        claimed: Set[int] = {r.hospital_id for r in state.results.values() if r.hospital_id is not None}
-        unclaimed: Dict[Tuple[str, str, Optional[str]], List[int]] = {}
-        for hospital in existing:
-            if hospital.get("id") in claimed:
+        # No await below, so concurrent rows can't claim the same record.
+        claimed = {r.hospital_id for r in state.results.values() if r.hospital_id is not None}
+        matched = 0
+        for row in rows:
+            record = _find_unclaimed(existing, row, claimed)
+            if record is None:
                 continue
-            key = (hospital.get("name"), hospital.get("address"), hospital.get("phone"))
-            unclaimed.setdefault(key, []).append(hospital["id"])
+            result = state.results[row.row]
+            result.hospital_id = record["id"]
+            result.status = RowStatus.CREATED
+            result.error = None
+            claimed.add(record["id"])
+            matched += 1
+        return matched == len(rows)
 
-        for row in failed:
-            ids = unclaimed.get((row.name, row.address, row.phone))
-            if ids:
-                result = state.results[row.row]
-                result.hospital_id = ids.pop(0)
-                result.status = RowStatus.CREATED
-                result.error = None
+
+def _find_unclaimed(records: List[Dict[str, Any]], row: HospitalRow, claimed: set) -> Optional[Dict[str, Any]]:
+    for record in records:
+        if record.get("id") in claimed:
+            continue
+        if (record.get("name"), record.get("address"), record.get("phone")) == (row.name, row.address, row.phone):
+            return record
+    return None
