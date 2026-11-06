@@ -7,7 +7,8 @@ Each upload becomes a **batch**. Hospitals are created inactive under one batch
 ID, and the whole batch is activated in a single call once every row succeeds,
 so the directory never shows half an upload as active.
 
-- **Live:** `https://<render-url>/docs` (interactive Swagger UI)
+- **Live:** https://paribus-hospital-bulk-8941.onrender.com/docs (interactive Swagger UI).
+  It runs on Render's free plan, which sleeps when idle, so the first request may take up to a minute.
 - **Stack:** Python 3.12, FastAPI, httpx (async), Pydantic v2, pytest + respx
 
 ## Quick start
@@ -29,6 +30,9 @@ Try it:
 
 ```bash
 curl -F file=@samples/hospitals.csv http://localhost:8000/hospitals/bulk
+
+# or against the live deployment
+curl -F file=@samples/hospitals.csv https://paribus-hospital-bulk-8941.onrender.com/hospitals/bulk
 ```
 
 ## Endpoints
