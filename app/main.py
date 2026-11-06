@@ -1,9 +1,24 @@
+import asyncio
+import hashlib
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+import httpx
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import JSONResponse
 
 from app.client import HospitalAPIError, HospitalDirectoryClient
@@ -59,9 +74,30 @@ def _get_batch(request: Request, batch_id: uuid.UUID) -> BatchState:
     return state
 
 
+def _result_response(state: BatchState, replayed: bool = False) -> JSONResponse:
+    """A batch result: 202 with a Location header while it runs, 200 once it has finished."""
+    code = 202 if state.is_running else 200
+    headers = {"Location": f"/hospitals/bulk/{state.batch_id}"}
+    if replayed:
+        headers["Idempotent-Replayed"] = "true"
+    return JSONResponse(status_code=code, content=state.to_result().model_dump(mode="json"), headers=headers)
+
+
 @app.get("/", tags=["health"])
 async def health():
+    """Liveness: the service is up."""
     return {"status": "ok"}
+
+
+@app.get("/health", tags=["health"])
+async def health_with_upstream(request: Request):
+    """Readiness: the service is up and whether the Hospital Directory API answers."""
+    try:
+        latency = await request.app.state.client.ping(timeout=5.0)
+        upstream = {"reachable": True, "latency_ms": round(latency * 1000)}
+    except httpx.HTTPError as exc:
+        upstream = {"reachable": False, "error": type(exc).__name__}
+    return {"status": "ok" if upstream["reachable"] else "degraded", "upstream": upstream}
 
 
 @app.post("/hospitals/bulk/validate", response_model=ValidationReport, tags=["bulk"])
@@ -75,7 +111,12 @@ async def validate_bulk_csv(request: Request, file: UploadFile = File(...)):
     "/hospitals/bulk",
     response_model=BulkResult,
     tags=["bulk"],
-    responses={202: {"model": BulkResult}, 422: {"model": ValidationReport}},
+    responses={
+        202: {"model": BulkResult, "description": "Accepted; processing in the background"},
+        409: {"description": "Idempotency-Key reused with a different file"},
+        413: {"description": "File too large"},
+        422: {"model": ValidationReport, "description": "Invalid CSV"},
+    },
 )
 async def bulk_create_hospitals(
     request: Request,
@@ -84,25 +125,43 @@ async def bulk_create_hospitals(
     async_mode: bool = Query(
         False,
         alias="async",
-        description="Return 202 immediately and process in the background; poll GET /hospitals/bulk/{batch_id}",
+        description="Return 202 immediately and process in the background; follow progress at "
+        "GET /hospitals/bulk/{batch_id} or WS /hospitals/bulk/{batch_id}/ws",
+    ),
+    idempotency_key: Optional[str] = Header(
+        None,
+        max_length=128,
+        description="Repeat an upload safely: the same key and file return the original batch instead of a new one",
     ),
 ):
     """Create every hospital in the CSV under a new batch, then activate the batch."""
     content = await _read_upload(request, file)
+    store: BatchStore = request.app.state.store
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    if idempotency_key:
+        existing = store.find_by_key(idempotency_key)
+        if existing is not None:
+            if existing.content_hash != content_hash:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency-Key was already used with a different file")
+            return _result_response(existing, replayed=True)
+
     report = validate_csv(content, request.app.state.settings.max_csv_rows)
     if not report.valid:
         return JSONResponse(status_code=422, content=report.model_dump(mode="json"))
 
     state = BatchState.new(str(uuid.uuid4()), report.rows)
-    request.app.state.store.add(state)
+    state.idempotency_key = idempotency_key
+    state.content_hash = content_hash
+    store.add(state)
     processor: BulkProcessor = request.app.state.processor
 
     if async_mode:
         background.add_task(processor.run, state)
-        return JSONResponse(status_code=202, content=state.to_result().model_dump(mode="json"))
+        return _result_response(state)
 
     await processor.run(state)
-    return state.to_result()
+    return _result_response(state)
 
 
 @app.get("/hospitals/bulk", response_model=List[BulkResult], tags=["bulk"])
@@ -141,3 +200,37 @@ async def rollback_batch(request: Request, batch_id: uuid.UUID):
     except HospitalAPIError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Hospital Directory API error: {exc}")
     return state.to_result()
+
+
+@app.websocket("/hospitals/bulk/{batch_id}/ws")
+async def batch_progress_ws(websocket: WebSocket, batch_id: str):
+    """Stream a batch's progress: a JSON snapshot on connect and after every change.
+
+    The server closes the socket once the batch has finished (code 1000), or
+    with code 4404 for an unknown batch.
+    """
+    await websocket.accept()
+    state = None
+    try:
+        state = websocket.app.state.store.get(str(uuid.UUID(batch_id)))
+    except ValueError:
+        pass
+    if state is None:
+        await websocket.send_json({"error": "Batch not found"})
+        await websocket.close(code=4404)
+        return
+
+    last = None
+    try:
+        while True:
+            snapshot = state.to_result().model_dump(mode="json")
+            snapshot.pop("processing_time_seconds")  # changes every tick; not a progress event
+            if snapshot != last:
+                last = snapshot
+                await websocket.send_json(state.to_result().model_dump(mode="json"))
+            if not state.is_running:
+                break
+            await asyncio.sleep(0.2)
+        await websocket.close()
+    except WebSocketDisconnect:
+        pass

@@ -66,3 +66,22 @@ def test_rejects_rows_with_extra_columns():
 def test_rejects_duplicate_rows_but_allows_same_name_elsewhere():
     report = check("name,address,phone\nA,1 St,5\nA,2 St,5\nA,1 St,6\na,1 st,5\n")
     assert [(e.row, e.message) for e in report.errors] == [(4, "Duplicate of row 1")]
+
+
+def test_rejects_duplicate_columns():
+    report = check("name,address,name\nA,B,C\n")
+    assert report.errors[0].message == "Duplicate column(s): name"
+
+
+def test_reports_malformed_csv_in_the_header():
+    huge = "x" * 140_000  # beyond the csv module's field size limit
+    report = check(f"{huge},address\nA,B\n")
+    assert report.errors[0].message == "CSV file has no header row"
+
+
+def test_reports_malformed_csv_in_a_row():
+    huge = "x" * 140_000
+    report = check(f"name,address\nA,B\n{huge},C\n")
+    assert not report.valid
+    assert report.errors[0].row == 2
+    assert report.errors[0].message.startswith("Malformed CSV")

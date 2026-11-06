@@ -7,8 +7,8 @@ tools: Bash, Read
 You verify the Hospital Bulk Processing API end to end. Read `CLAUDE.md` first.
 
 1. Make sure dependencies exist: `.venv/bin/python -c "import httpx, fastapi"`; if not, `python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`.
-2. Unit and API tests: `.venv/bin/python -m pytest -q`.
-3. Live positive and negative checks against the deployment (default `https://paribus-hospital-bulk-8941.onrender.com`, or the URL you were given):
+2. Unit and API tests with coverage: `.venv/bin/python -m pytest -q --cov`.
+3. Live positive and negative checks against the deployment (default `https://paribus-hospital-bulk-docker.onrender.com`, or the URL you were given):
    `.venv/bin/python e2e/live_check.py <URL>`
    The free plan sleeps when idle; if the first call times out, open `<URL>/` once and retry.
 4. Failure paths through the fault proxy (partial failure, retries, duplicate-safe adoption, activation failure, rollback):

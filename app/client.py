@@ -62,6 +62,12 @@ class HospitalDirectoryClient:
         except httpx.HTTPError as exc:
             logger.warning("Upstream warm-up failed: %s", exc)
 
+    async def ping(self, timeout: float) -> float:
+        """Return the upstream's health-check latency in seconds; raises httpx.HTTPError."""
+        response = await self._http.get("/", timeout=timeout)
+        response.raise_for_status()
+        return response.elapsed.total_seconds()
+
     async def create_hospital(self, row: HospitalRow, batch_id: str) -> Dict[str, Any]:
         payload = {
             "name": row.name,

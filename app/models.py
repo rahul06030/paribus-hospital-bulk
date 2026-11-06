@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,7 @@ class BulkResult(BaseModel):
     batch_activated: bool
     created_at: datetime
     hospitals: List[HospitalResult]
+    links: Dict[str, str] = Field(default_factory=dict)
 
 
 class ValidationReport(BaseModel):

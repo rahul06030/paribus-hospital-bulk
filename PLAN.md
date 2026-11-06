@@ -48,8 +48,8 @@ designing anything:
 
 Three layers:
 
-1. **Unit and API tests** (`tests/`, 30 tests, no network). A fake upstream (`FakeDirectory`) can fail on demand: 500s, 503s, 422s, failed activation, and "saved but answered 500".
-2. **Live checks** (`e2e/live_check.py`, 29 checks) against the deployed URL and the real upstream: 7 positive flows (sync, 20-row limit, flexible CSV, async with polling, list, validate, rollback) and 22 negative cases (empty, header-only, missing, unknown and duplicate columns, extra cells, duplicate rows, more than 20 rows, more than 256 KB, non-UTF-8, binary, field too long, every error listed at once, nothing created upstream for a bad file, unknown or malformed batch IDs, resume of a completed or rolled-back batch, resume or delete while processing, bad list limits). Each run verifies results on the upstream and deletes what it created.
+1. **Unit and API tests** (`tests/`, 86 tests, 99% coverage, no network; one test file per endpoint group plus the client, processor and store). A fake upstream (`FakeDirectory`) can fail on demand: 500s, 503s, 422s, failed activation, and "saved but answered 500".
+2. **Live checks** (`e2e/live_check.py`, 33 checks, including health, idempotency and WebSocket checks added in section 7) against the deployed URL and the real upstream: 10 positive flows (sync, 20-row limit, flexible CSV, async with polling, WebSocket stream, idempotent replay, upstream health, list, validate, rollback) and 23 negative cases (unknown batch on the WebSocket, empty, header-only, missing, unknown and duplicate columns, extra cells, duplicate rows, more than 20 rows, more than 256 KB, non-UTF-8, binary, field too long, every error listed at once, nothing created upstream for a bad file, unknown or malformed batch IDs, resume of a completed or rolled-back batch, resume or delete while processing, bad list limits). Each run verifies results on the upstream and deletes what it created.
 3. **Failure paths against the real upstream** (`e2e/run_failure_checks.sh`, 6 checks). A small fault-injecting proxy sits between the service and the real upstream: partial failure then resume, transient errors retried, saved-but-errored create adopted, activation failure then resume, every row failing, rollback of a partial batch.
 
 ## 6. Bug found by the failure-path tests (fixed)
@@ -67,9 +67,25 @@ and resume only adopted one of them.
 - Matching only works if no two rows in a file are identical, so the CSV validator now rejects exact duplicate rows (case-insensitive name, address and phone) with "Duplicate of row N".
 - Regression tests: `test_ambiguous_create_failure_does_not_create_a_duplicate`, `test_ambiguous_failure_without_a_saved_record_is_retried`, `test_identical_rows_are_rejected`, plus the "Saved-but-errored create not duplicated" failure-path check.
 
-## 7. Known limits and next steps
+## 7. Second round: review against other submissions (done)
+
+Over 30 candidates have published this same assignment on GitHub. Reading the
+strongest (their READMEs and file trees) showed four things they had that this
+repo didn't, plus one flaw in our own code:
+
+- [x] **WebSocket progress.** The brief says "WebSocket or polling"; we now offer both: `WS /hospitals/bulk/{id}/ws` pushes a snapshot on every change and closes with 1000 when done, 4404 for an unknown batch.
+- [x] **`Idempotency-Key` on uploads**, so a client re-sending an upload whose response it lost gets the original batch rather than a second copy of every hospital.
+- [x] **Upstream-aware health check** (`GET /health` → `ok` or `degraded`), plus a `Location` header and `links` on batch results.
+- [x] **CI and coverage**: GitHub Actions runs pytest on Python 3.9 and 3.12 (failing under 95% coverage) and builds and starts the Docker image.
+- [x] **Flaw fixed:** a row held its concurrency slot while sleeping between retries, so one retrying row could stall the others. It now holds a slot only while a request is in flight (`test_a_row_backing_off_does_not_hold_a_concurrency_slot`).
+- [x] **Docker in production:** a second Render service builds from the `Dockerfile`; it is now the submitted URL.
+
+No public reviews of Paribus's evaluation were found, so the brief's rubric is
+the guide; the README opens with a table mapping each point of the brief to
+where it is implemented.
+
+## 8. Known limits and next steps
 
 - State is in memory and lives in one process. Next step: Redis or Postgres for batch state, and a worker queue (arq, RQ or Celery) for processing, so batches survive restarts and the service can scale out.
 - Matching a saved record by name, address and phone is a stand-in for an idempotency key on the upstream create, which would be the robust fix. It relies on rows in a file being distinct, which the validator enforces.
 - No authentication or rate limiting, matching the upstream. Add API keys and per-client limits before real use.
-- WebSocket progress was not added; polling covers the need with less moving parts.

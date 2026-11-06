@@ -14,9 +14,9 @@ Read `README.md` for the design and `PLAN.md` for how it was built.
 
 ## Commands
 - Setup: `python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`
-- Unit/API tests: `.venv/bin/python -m pytest -q`
+- Unit/API tests with coverage: `.venv/bin/python -m pytest -q --cov` (CI fails under 95%)
 - Run locally: `.venv/bin/uvicorn app.main:app --reload`
-- Live checks (positive and negative): `.venv/bin/python e2e/live_check.py https://paribus-hospital-bulk-8941.onrender.com`
+- Live checks (positive and negative): `.venv/bin/python e2e/live_check.py https://paribus-hospital-bulk-docker.onrender.com`
 - Failure-path checks via fault proxy: `sh e2e/run_failure_checks.sh`
 
 ## Rules that must keep holding
@@ -33,6 +33,11 @@ Read `README.md` for the design and `PLAN.md` for how it was built.
 - e2e scripts create real records upstream and delete them at the end; keep it that way.
 
 ## Deploy
-Render web service `paribus-hospital-bulk` (free plan, Singapore). Pushing does **not** deploy (Render's GitHub app isn't installed on the repo); deploy explicitly after pushing:
-`render deploys create srv-dbmus5rrjlhs73chojkg --commit $(git rev-parse HEAD) --wait --confirm`.
-`render deploys list srv-dbmus5rrjlhs73chojkg -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL.
+Two Render web services (free plan, Singapore) deploy the same repo:
+- **`paribus-hospital-bulk-docker`** (`srv-dbmv8fbm8hqs73bh3440`), Docker runtime, builds the `Dockerfile`. This is the submitted URL: https://paribus-hospital-bulk-docker.onrender.com
+- `paribus-hospital-bulk` (`srv-dbmus5rrjlhs73chojkg`), native Python runtime, kept as a fallback: https://paribus-hospital-bulk-8941.onrender.com
+
+Pushing does **not** deploy (Render's GitHub app isn't installed on the repo). After pushing, deploy each service:
+`render deploys create <service-id> --commit $(git rev-parse HEAD) --wait --confirm`.
+`render deploys list <service-id> -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL.
+GitHub Actions (`.github/workflows/ci.yml`) runs the tests on Python 3.9 and 3.12 and builds and starts the Docker image on every push.

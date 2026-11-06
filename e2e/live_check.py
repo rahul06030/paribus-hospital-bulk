@@ -1,8 +1,12 @@
 """End-to-end checks against a running deployment. Usage: python live_check.py BASE_URL"""
+import asyncio
+import json
 import sys
 import time
+import uuid
 
 import httpx
+import websockets
 
 BASE = sys.argv[1].rstrip("/")
 UPSTREAM = "https://hospital-directory.onrender.com"
@@ -121,6 +125,66 @@ def p_rollback():
     return "batch gone upstream; second DELETE is a no-op"
 
 
+def p_health_upstream():
+    d = expect(c.get("/health"), 200)
+    assert d["status"] == "ok" and d["upstream"]["reachable"], d
+    return f"upstream reachable, {d['upstream']['latency_ms']} ms"
+
+
+def p_idempotency():
+    key = f"live-{uuid.uuid4()}"
+    hdr = {"Idempotency-Key": key}
+    first = c.post("/hospitals/bulk", files={"file": ("h.csv", GOOD, "text/csv")}, headers=hdr)
+    d1 = expect(first, 200)
+    batches.append(d1["batch_id"])
+    again = c.post("/hospitals/bulk", files={"file": ("h.csv", GOOD, "text/csv")}, headers=hdr)
+    d2 = expect(again, 200)
+    assert d2["batch_id"] == d1["batch_id"] and again.headers.get("idempotent-replayed") == "true"
+    up = httpx.get(f"{UPSTREAM}/hospitals/batch/{d1['batch_id']}", timeout=60).json()
+    assert len(up) == 3, f"{len(up)} upstream records after a replay"
+    other = c.post("/hospitals/bulk", files={"file": ("h.csv", csv("name,address", "X,Y"), "text/csv")}, headers=hdr)
+    expect(other, 409)
+    return "replay returns the same batch (3 records upstream, not 6); same key + other file -> 409"
+
+
+def p_websocket():
+    r = post_file("/hospitals/bulk", GOOD, params={"async": "true"})
+    d = expect(r, 202)
+    batches.append(d["batch_id"])
+    assert r.headers["location"] == f"/hospitals/bulk/{d['batch_id']}"
+    ws_url = BASE.replace("https://", "wss://").replace("http://", "ws://") + d["links"]["progress_ws"]
+
+    async def stream():
+        events = []
+        async with websockets.connect(ws_url, open_timeout=60) as ws:
+            async for message in ws:
+                events.append(json.loads(message))
+            return events, ws.close_code
+
+    events, code = asyncio.run(stream())
+    statuses = [e["status"] for e in events]
+    assert statuses[-1] == "completed" and events[-1]["batch_activated"], statuses
+    assert code == 1000, code
+    return f"{len(events)} events: " + " -> ".join(dict.fromkeys(statuses)) + "; server closed 1000"
+
+
+def n_websocket_unknown():
+    url = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/hospitals/bulk/00000000-0000-0000-0000-000000000000/ws"
+
+    async def run():
+        async with websockets.connect(url, open_timeout=60) as ws:
+            msg = json.loads(await ws.recv())
+            try:
+                await ws.recv()
+            except websockets.ConnectionClosed:
+                pass
+            return msg, ws.close_code
+
+    msg, code = asyncio.run(run())
+    assert msg == {"error": "Batch not found"} and code == 4404, (msg, code)
+    return "error message, then close code 4404"
+
+
 # ---------- negative ----------
 
 def n(path_params, content, code, must_contain, filename="h.csv", path="/hospitals/bulk"):
@@ -213,6 +277,10 @@ checks = [
     ("positive", "Flexible CSV format", p_flexible_header),
     ("positive", "Async mode + progress polling", p_async_poll),
     ("positive", "List batches", p_list),
+    ("positive", "Health incl. upstream check", p_health_upstream),
+    ("positive", "Idempotency-Key replay", p_idempotency),
+    ("positive", "WebSocket progress stream", p_websocket),
+    ("negative", "WebSocket for unknown batch", n_websocket_unknown),
     ("negative", "No file uploaded", n_no_file),
     ("negative", "Empty file", n(None, b"", 422, "CSV file is empty")),
     ("negative", "Header only", n(None, b"name,address\n", 422, "no data rows")),

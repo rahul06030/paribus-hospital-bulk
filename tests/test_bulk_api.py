@@ -195,3 +195,25 @@ def test_list_batches_newest_first(client):
     second = upload(client, make_csv(ROWS[1:2])).json()["batch_id"]
     ids = [b["batch_id"] for b in client.get("/hospitals/bulk").json()]
     assert ids[:2] == [second, first]
+
+
+def test_rollback_reports_upstream_failure_as_502(client, directory):
+    batch_id = upload(client, make_csv(ROWS)).json()["batch_id"]
+    directory.delete_status = 500
+    response = client.delete(f"/hospitals/bulk/{batch_id}")
+    assert response.status_code == 502
+    assert "Hospital Directory API error" in response.json()["detail"]
+    assert client.get(f"/hospitals/bulk/{batch_id}").json()["status"] == "completed"
+
+
+def test_resume_and_rollback_refuse_a_running_batch(client):
+    from app.models import BatchStatus, HospitalRow
+    from app.store import BatchState
+
+    state = BatchState.new("22222222-2222-2222-2222-222222222222", [HospitalRow(row=1, name="A", address="B")])
+    state.status = BatchStatus.PROCESSING
+    client.app.state.store.add(state)
+
+    assert client.post(f"/hospitals/bulk/{state.batch_id}/resume").status_code == 409
+    assert client.delete(f"/hospitals/bulk/{state.batch_id}").status_code == 409
+    assert client.get(f"/hospitals/bulk/{state.batch_id}").json()["status"] == "processing"

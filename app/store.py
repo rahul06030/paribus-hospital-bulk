@@ -26,6 +26,8 @@ class BatchState:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    idempotency_key: Optional[str] = None
+    content_hash: Optional[str] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @classmethod
@@ -57,6 +59,11 @@ class BatchState:
             batch_activated=self.batch_activated,
             created_at=self.created_at,
             hospitals=results,
+            links={
+                "self": f"/hospitals/bulk/{self.batch_id}",
+                "progress_ws": f"/hospitals/bulk/{self.batch_id}/ws",
+                "resume": f"/hospitals/bulk/{self.batch_id}/resume",
+            },
         )
 
 
@@ -64,17 +71,25 @@ class BatchStore:
     def __init__(self, max_batches: int):
         self._max = max_batches
         self._batches: "OrderedDict[str, BatchState]" = OrderedDict()
+        self._by_key: Dict[str, str] = {}
 
     def add(self, state: BatchState) -> None:
         self._batches[state.batch_id] = state
+        if state.idempotency_key:
+            self._by_key[state.idempotency_key] = state.batch_id
         while len(self._batches) > self._max:
             # Evict the oldest batch that isn't running.
             for batch_id, old in self._batches.items():
                 if not old.is_running:
                     del self._batches[batch_id]
+                    self._by_key.pop(old.idempotency_key, None)
                     break
             else:
                 break
+
+    def find_by_key(self, idempotency_key: str) -> Optional[BatchState]:
+        batch_id = self._by_key.get(idempotency_key)
+        return self._batches.get(batch_id) if batch_id else None
 
     def get(self, batch_id: str) -> Optional[BatchState]:
         return self._batches.get(batch_id)

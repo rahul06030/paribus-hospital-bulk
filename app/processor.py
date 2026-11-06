@@ -83,8 +83,10 @@ class BulkProcessor:
 
     async def _create_row(self, state: BatchState, row: HospitalRow, semaphore: asyncio.Semaphore) -> None:
         result = state.results[row.row]
-        async with semaphore:
-            for attempt in range(self._max_retries + 1):
+        for attempt in range(self._max_retries + 1):
+            # Hold a slot only while talking to the upstream, not while backing
+            # off, so one retrying row doesn't hold up the others.
+            async with semaphore:
                 result.attempts += 1
                 try:
                     created = await self._client.create_hospital(row, state.batch_id)
@@ -97,12 +99,12 @@ class BulkProcessor:
                         result.status = RowStatus.FAILED
                         result.error = str(exc)
                         return
-                    await asyncio.sleep(self._retry_backoff * 2 ** attempt)
                 else:
                     result.hospital_id = created.get("id")
                     result.status = RowStatus.CREATED
                     result.error = None
                     return
+            await asyncio.sleep(self._retry_backoff * 2 ** attempt)
 
     async def _finish(self, state: BatchState) -> None:
         results = state.results.values()

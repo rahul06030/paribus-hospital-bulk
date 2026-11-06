@@ -1,13 +1,11 @@
 services:
   - type: web
-    name: hospital-bulk-processor
-    runtime: python
+    name: paribus-hospital-bulk-docker
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    region: singapore
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.4
       - key: HOSPITAL_API_BASE_URL
         value: https://hospital-directory.onrender.com

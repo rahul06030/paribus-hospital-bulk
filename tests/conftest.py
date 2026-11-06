@@ -30,6 +30,7 @@ class FakeDirectory:
         self.reject_names = set()  # names that get a 422
         self.save_then_fail_names = {}  # name -> number of creates that save but answer 500
         self.activate_status = 200
+        self.delete_status = 200
         self.create_calls = 0
 
     def create(self, request: httpx.Request) -> httpx.Response:
@@ -70,6 +71,8 @@ class FakeDirectory:
         return httpx.Response(200, json=hospitals)
 
     def delete_batch(self, request: httpx.Request, batch_id: str) -> httpx.Response:
+        if self.delete_status != 200:
+            return httpx.Response(self.delete_status, json={"detail": "delete failed"})
         hospitals = self.batch(batch_id)
         for h in hospitals:
             del self.hospitals[h["id"]]
@@ -80,11 +83,12 @@ class FakeDirectory:
 def directory():
     fake = FakeDirectory()
     with respx.mock(base_url=UPSTREAM, assert_all_called=False) as mock:
-        mock.get("/").respond(200, json={"status": "ok"})
+        mock.get("/", name="health").respond(200, json={"status": "ok"})
         mock.post("/hospitals/").mock(side_effect=fake.create)
         mock.patch(path__regex=r"/hospitals/batch/(?P<batch_id>[^/]+)/activate").mock(side_effect=fake.activate)
         mock.get(path__regex=r"/hospitals/batch/(?P<batch_id>[^/]+)$").mock(side_effect=fake.get_batch)
         mock.delete(path__regex=r"/hospitals/batch/(?P<batch_id>[^/]+)$").mock(side_effect=fake.delete_batch)
+        fake.router = mock
         yield fake
 
 
