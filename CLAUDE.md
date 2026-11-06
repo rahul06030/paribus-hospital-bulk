@@ -39,5 +39,6 @@ Two Render web services (free plan, Singapore) deploy the same repo:
 
 Pushing does **not** deploy (Render's GitHub app isn't installed on the repo). After pushing, deploy each service:
 `render deploys create <service-id> --commit $(git rev-parse HEAD) --wait --confirm`.
-`render deploys list <service-id> -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL.
+`render deploys list <service-id> -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL, but wait ~2 minutes first: Render keeps the old instance serving for a while after "deploy succeeded", and batches created on it vanish when it stops (state is in memory), so an early run shows timeouts and 404s that aren't app bugs.
+Render's log API is sometimes unavailable (503); `GET https://api.render.com/v1/services/<id>/events` shows deploys, restarts and crashes.
 GitHub Actions (`.github/workflows/ci.yml`) runs the tests on Python 3.9 and 3.12 and builds and starts the Docker image on every push.
