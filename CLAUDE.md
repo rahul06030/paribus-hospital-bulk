@@ -33,12 +33,10 @@ Read `README.md` for the design and `PLAN.md` for how it was built.
 - e2e scripts create real records upstream and delete them at the end; keep it that way.
 
 ## Deploy
-Two Render web services (free plan, Singapore) deploy the same repo:
-- **`paribus-hospital-bulk-docker`** (`srv-dbmv8fbm8hqs73bh3440`), Docker runtime, builds the `Dockerfile`. This is the submitted URL: https://paribus-hospital-bulk-docker.onrender.com
-- `paribus-hospital-bulk` (`srv-dbmus5rrjlhs73chojkg`), native Python runtime, kept as a fallback: https://paribus-hospital-bulk-8941.onrender.com
+One Render web service (free plan, Singapore): **`paribus-hospital-bulk-docker`** (`srv-dbmv8fbm8hqs73bh3440`), Docker runtime, builds the `Dockerfile`. This is the submitted URL: https://paribus-hospital-bulk-docker.onrender.com
 
-Pushing does **not** deploy (Render's GitHub app isn't installed on the repo). After pushing, deploy each service:
-`render deploys create <service-id> --commit $(git rev-parse HEAD) --wait --confirm`.
-`render deploys list <service-id> -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL, but wait ~2 minutes first: Render keeps the old instance serving for a while after "deploy succeeded", and batches created on it vanish when it stops (state is in memory), so an early run shows timeouts and 404s that aren't app bugs.
+Pushing does **not** deploy (Render's GitHub app isn't installed on the repo). After pushing, deploy:
+`render deploys create srv-dbmv8fbm8hqs73bh3440 --commit $(git rev-parse HEAD) --wait --confirm`.
+`render deploys list srv-dbmv8fbm8hqs73bh3440 -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL, but wait ~2 minutes first: Render keeps the old instance serving for a while after "deploy succeeded", and batches created on it vanish when it stops (state is in memory), so an early run shows timeouts and 404s that aren't app bugs.
 Render's log API is sometimes unavailable (503); `GET https://api.render.com/v1/services/<id>/events` shows deploys, restarts and crashes.
 GitHub Actions (`.github/workflows/ci.yml`) runs the tests on Python 3.9 and 3.12 and builds and starts the Docker image on every push.
