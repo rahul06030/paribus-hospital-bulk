@@ -33,5 +33,6 @@ Read `README.md` for the design and `PLAN.md` for how it was built.
 - e2e scripts create real records upstream and delete them at the end; keep it that way.
 
 ## Deploy
-Render web service `paribus-hospital-bulk` (free plan, Singapore), auto-deploys on push to `main`.
-`render deploys list srv-dbmus5rrjlhs73chojkg -o json` shows deploy status. After a deploy, run `e2e/live_check.py` against the live URL.
+Render web service `paribus-hospital-bulk` (free plan, Singapore). Pushing does **not** deploy (Render's GitHub app isn't installed on the repo); deploy explicitly after pushing:
+`render deploys create srv-dbmus5rrjlhs73chojkg --commit $(git rev-parse HEAD) --wait --confirm`.
+`render deploys list srv-dbmus5rrjlhs73chojkg -o json` shows deploy status and the deployed commit. After a deploy, run `e2e/live_check.py` against the live URL.

@@ -41,7 +41,7 @@ designing anything:
 ## 4. Deploy (done)
 
 - [x] Public GitHub repo
-- [x] Render web service (free plan, Singapore) created with the Render CLI; auto-deploys on push to `main`
+- [x] Render web service (free plan, Singapore) created with the Render CLI; deploys are triggered with `render deploys create` after each push
 - [x] Live smoke test against the real upstream
 
 ## 5. Testing (done)
